@@ -257,6 +257,11 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
     def _sigma_to_t(self, sigma):
         return sigma * self.config.num_train_timesteps
 
+    def _sigma_at(self, index):
+        # A copy, not a view: on MPS, a 0-dim CPU view used with a device tensor
+        # is read from the start of its storage, i.e. as sigmas[0].
+        return self.sigmas[index].clone()
+
     def _sigma_to_alpha_sigma_t(self, sigma):
         return 1 - sigma, sigma
 
@@ -294,12 +299,12 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
                 "and has no effect as model output conversion is now handled via an internal counter `self.step_index`",
             )
 
-        sigma = self.sigmas[self.step_index]
+        sigma = self._sigma_at(self.step_index)
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma)
 
         if self.predict_x0:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self._sigma_at(self.step_index)
                 x0_pred = sample - sigma_t * model_output
             else:
                 raise ValueError(
@@ -313,7 +318,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             return x0_pred
         else:
             if self.config.prediction_type == "flow_prediction":
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self._sigma_at(self.step_index)
                 epsilon = sample - (1 - sigma_t) * model_output
             else:
                 raise ValueError(
@@ -322,7 +327,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
                 )
 
             if self.config.thresholding:
-                sigma_t = self.sigmas[self.step_index]
+                sigma_t = self._sigma_at(self.step_index)
                 x0_pred = sample - sigma_t * model_output
                 x0_pred = self._threshold_sample(x0_pred)
                 epsilon = model_output + x0_pred
@@ -382,7 +387,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
             x_t = self.solver_p.step(model_output, s0, x).prev_sample
             return x_t
 
-        sigma_t, sigma_s0 = (self.sigmas[self.step_index + 1], self.sigmas[self.step_index])  # pyright: ignore
+        sigma_t, sigma_s0 = (self._sigma_at(self.step_index + 1), self._sigma_at(self.step_index))  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
 
@@ -397,7 +402,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         for i in range(1, order):
             si = self.step_index - i  # pyright: ignore
             mi = model_output_list[-(i + 1)]
-            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si])
+            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self._sigma_at(si))
             lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
             rk = (lambda_si - lambda_s0) / h
             rks.append(rk)
@@ -518,7 +523,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         x_t = this_sample
         model_t = this_model_output
 
-        sigma_t, sigma_s0 = (self.sigmas[self.step_index], self.sigmas[self.step_index - 1])  # pyright: ignore
+        sigma_t, sigma_s0 = (self._sigma_at(self.step_index), self._sigma_at(self.step_index - 1))  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
 
@@ -533,7 +538,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
         for i in range(1, order):
             si = self.step_index - (i + 1)  # pyright: ignore
             mi = model_output_list[-(i + 1)]
-            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si])
+            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self._sigma_at(si))
             lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
             rk = (lambda_si - lambda_s0) / h
             rks.append(rk)
@@ -735,8 +740,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
 
         """
         device = curr_state.device
-        curr_t = self.sigmas[t]
-        prev_t = self.sigmas[t + 1]
+        curr_t = self._sigma_at(t)
+        prev_t = self._sigma_at(t + 1)
         variance_noise = randn_tensor(curr_state.shape, generator=generator, device=device, dtype=curr_state.dtype)
         cur_clean_ = curr_state - curr_t * velocity
         prev_state = prev_t * variance_noise + (1 - prev_t) * cur_clean_
@@ -768,8 +773,8 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin):
                 A random number generator.
         """
         device = curr_state.device
-        curr_t = self.sigmas[t]
-        prev_t = self.sigmas[t + 1]
+        curr_t = self._sigma_at(t)
+        prev_t = self._sigma_at(t + 1)
         cos = torch.cos(torch.tensor(noise_theta) * torch.pi / 2).to(device)  # if noise_theta is 0, it degenerates to standard flow matching
         sin = torch.sin(torch.tensor(noise_theta) * torch.pi / 2).to(device)
         prev_sample_mean = (1 - prev_t + prev_t * cos) * (curr_state - curr_t * velocity) + prev_t * cos * velocity
